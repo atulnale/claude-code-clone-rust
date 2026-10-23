@@ -101,14 +101,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
             }
-            Some(tool) => {
-                let tool_res = execute_tool(&tool[0])?;
-                messages.push(Message {
-                    role: String::from("tool"),
-                    content: Some(tool_res),
-                    tool_call_id: Some((&tool[0]).id.clone()),
-                    tool_calls: None,
-                });
+            Some(tool_calls) => {
+                for tool in tool_calls {
+                    let tool_res = execute_tool(&tool)?;
+                    messages.push(Message {
+                        role: String::from("tool"),
+                        content: Some(tool_res),
+                        tool_call_id: Some((&tool).id.clone()),
+                        tool_calls: None,
+                    });
+                }
             }
         }
     }
@@ -134,8 +136,11 @@ async fn call_llm(
 
 fn execute_tool(tool: &ToolCall) -> io::Result<String> {
     match tool.function.name.as_str() {
-        "Read" => read_tool(tool.function.arguments.as_str()),
-        _ => Ok("Not found".to_string()),
+        "Read" => read_tool(&tool.function.arguments),
+        name => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown tool: {name}"),
+        )),
     }
 }
 
