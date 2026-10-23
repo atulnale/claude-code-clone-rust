@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::process::Command;
 use std::sync::LazyLock;
 use std::{env, process};
 
@@ -80,6 +81,23 @@ static tools: LazyLock<Vec<Value>> = LazyLock::new(|| {
                 "content": {
                   "type": "string",
                   "description": "The content to write to the file"
+                }
+              }
+            }
+          }
+        }),
+        json!({
+          "type": "function",
+          "function": {
+            "name": "Bash",
+            "description": "Execute a shell command",
+            "parameters": {
+              "type": "object",
+              "required": ["command"],
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "description": "The command to execute"
                 }
               }
             }
@@ -170,6 +188,7 @@ fn execute_tool(tool: &ToolCall) -> io::Result<String> {
     match tool.function.name.as_str() {
         "Read" => read_tool(&tool.function.arguments),
         "Write" => write_tool(&tool.function.arguments),
+        "Bash" => execute_bash(&tool.function.arguments),
         name => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown tool: {name}"),
@@ -199,4 +218,29 @@ fn write_tool(args: &str) -> io::Result<String> {
     writer.flush()?;
 
     Ok("Done".to_string())
+}
+
+fn execute_bash(args: &str) -> io::Result<String> {
+    let map: HashMap<String, String> = serde_json::from_str(args)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+    let command = map
+        .get("command")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
+
+    let mut iter = command.split_whitespace();
+    let cmd_name = iter
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "command is required"))?;
+    let cmd_args: Vec<&str> = iter.collect();
+
+    let output = Command::new(cmd_name).args(cmd_args).output()?;
+
+    let bytes = if output.status.success() {
+        output.stdout
+    } else {
+        output.stderr
+    };
+
+    String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
