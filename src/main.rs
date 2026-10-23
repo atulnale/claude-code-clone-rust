@@ -3,8 +3,8 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs;
-use std::io::{self};
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufWriter, Write};
 use std::sync::LazyLock;
 use std::{env, process};
 
@@ -46,23 +46,46 @@ struct FunctionCall {
 }
 
 static tools: LazyLock<Vec<Value>> = LazyLock::new(|| {
-    vec![json!({
-      "type": "function",
-      "function": {
-        "name": "Read",
-        "description": "Read and return the contents of a file",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "file_path": {
-              "type": "string",
-              "description": "The path to the file to read"
+    vec![
+        json!({
+          "type": "function",
+          "function": {
+            "name": "Read",
+            "description": "Read and return the contents of a file",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "type": "string",
+                  "description": "The path to the file to read"
+                }
+              },
+              "required": ["file_path"]
             }
-          },
-          "required": ["file_path"]
-        }
-      }
-    })]
+          }
+        }),
+        json!({
+          "type": "function",
+          "function": {
+            "name": "Write",
+            "description": "Write content to a file",
+            "parameters": {
+              "type": "object",
+              "required": ["file_path", "content"],
+              "properties": {
+                "file_path": {
+                  "type": "string",
+                  "description": "The path of the file to write to"
+                },
+                "content": {
+                  "type": "string",
+                  "description": "The content to write to the file"
+                }
+              }
+            }
+          }
+        }),
+    ]
 });
 
 #[tokio::main]
@@ -134,16 +157,6 @@ async fn call_llm(
     Ok(response)
 }
 
-fn execute_tool(tool: &ToolCall) -> io::Result<String> {
-    match tool.function.name.as_str() {
-        "Read" => read_tool(&tool.function.arguments),
-        name => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unknown tool: {name}"),
-        )),
-    }
-}
-
 fn read_tool(args: &str) -> io::Result<String> {
     let map: HashMap<String, String> = serde_json::from_str(args).unwrap_or_default();
     let file_path = map
@@ -151,4 +164,39 @@ fn read_tool(args: &str) -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
     let content = fs::read_to_string(file_path)?;
     Ok(content)
+}
+
+fn execute_tool(tool: &ToolCall) -> io::Result<String> {
+    match tool.function.name.as_str() {
+        "Read" => read_tool(&tool.function.arguments),
+        "Write" => write_tool(&tool.function.arguments),
+        name => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown tool: {name}"),
+        )),
+    }
+}
+
+fn write_tool(args: &str) -> io::Result<String> {
+    let map: HashMap<String, String> = serde_json::from_str(args)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
+    let file_path = map
+        .get("file_path")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
+    let content = map
+        .get("content")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "content is required"))?;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(file_path)?;
+
+    let mut writer = BufWriter::new(file);
+    writer.write_all(content.as_bytes())?;
+    writer.flush()?;
+
+    Ok("Done".to_string())
 }
