@@ -14,6 +14,7 @@ use std::{env, process};
 struct SkillMetadata {
     name: String,
     description: String,
+    context: Option<String>,
 }
 
 #[derive(Parser)]
@@ -53,7 +54,7 @@ struct FunctionCall {
     arguments: String,
 }
 
-static tools: LazyLock<Vec<Value>> = LazyLock::new(|| {
+static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
     vec![
         json!({
           "type": "function",
@@ -127,22 +128,20 @@ static tools: LazyLock<Vec<Value>> = LazyLock::new(|| {
         }),
     ]
 });
+static BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string())
+});
 
+static API_KEY: LazyLock<String> = LazyLock::new(|| {
+    env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
+        eprintln!("OPENROUTER_API_KEY is not set");
+        process::exit(1);
+    })
+});
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let base_url = env::var("OPENROUTER_BASE_URL")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-
-    let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
-        eprintln!("OPENROUTER_API_KEY is not set");
-        process::exit(1);
-    });
-
-    let config = OpenAIConfig::new()
-        .with_api_base(base_url)
-        .with_api_key(api_key);
     let mut messages: Vec<Message> = Vec::new();
     if let Ok(skills) = load_all_skills() {
         messages.push(Message {
@@ -158,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_call_id: None,
         });
     }
-    let client = Client::with_config(config);
+
     if let Ok(user_content) = evaluate_user_content(args.prompt) {
         messages.push(Message {
             role: "user".to_owned(),
@@ -167,6 +166,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_call_id: None,
         });
     }
+    if let Ok(content) = run_agent(&mut messages).await {
+        println!("{content}");
+    }
+
+    Ok(())
+}
+
+async fn run_agent(messages: &mut Vec<Message>) -> Result<String, Box<dyn std::error::Error>> {
+    let config = OpenAIConfig::new()
+        .with_api_base(BASE_URL.as_str())
+        .with_api_key(API_KEY.as_str());
+    let client = Client::with_config(config);
     loop {
         #[allow(unused_variables)]
         let response = call_llm(&client, &messages, "anthropic/claude-haiku-4.5").await?;
@@ -176,13 +187,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match &message.tool_calls {
             None => {
                 if let Some(content) = &message.content {
-                    println!("{content}");
-                    break;
+                    return Ok(content.to_owned());
                 }
             }
             Some(tool_calls) => {
                 for tool in tool_calls {
-                    let tool_res = execute_tool(&tool)?;
+                    let tool_res = execute_tool(&tool).await?;
                     messages.push(Message {
                         role: String::from("tool"),
                         content: Some(tool_res),
@@ -193,8 +203,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-
-    Ok(())
 }
 
 async fn call_llm(
@@ -207,7 +215,7 @@ async fn call_llm(
         .create_byot(json!({
             "messages": messages,
             "model": model,
-            "tools":*tools
+            "tools":*TOOLS
         }))
         .await?;
     Ok(response)
@@ -307,12 +315,12 @@ fn read_tool(args: &str) -> io::Result<String> {
     read_file(&file)
 }
 
-fn execute_tool(tool: &ToolCall) -> io::Result<String> {
+async fn execute_tool(tool: &ToolCall) -> io::Result<String> {
     match tool.function.name.as_str() {
         "Read" => read_tool(&tool.function.arguments),
         "Write" => write_tool(&tool.function.arguments),
         "Bash" => execute_bash(&tool.function.arguments),
-        "Skill" => skill_tool(&tool.function.arguments),
+        "Skill" => skill_tool(&tool.function.arguments).await,
         name => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown tool: {name}"),
@@ -320,7 +328,7 @@ fn execute_tool(tool: &ToolCall) -> io::Result<String> {
     }
 }
 
-fn skill_tool(args: &str) -> io::Result<String> {
+async fn skill_tool(args: &str) -> io::Result<String> {
     let map: HashMap<String, String> = serde_json::from_str(args)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let skill_name = map
@@ -331,7 +339,39 @@ fn skill_tool(args: &str) -> io::Result<String> {
     let path = PathBuf::from(".claude/skills")
         .join(skill_name)
         .join("SKILL.md");
-    read_file(&path)
+    let file_content = read_file(&path)?;
+    let rest = file_content.strip_prefix("---\n").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing opening front-matter delimiter",
+        )
+    })?;
+
+    let (front_matter, content) = rest.split_once("\n---").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Missing closing front-matter delimiter",
+        )
+    })?;
+
+    let metadata: SkillMetadata = serde_yaml::from_str(front_matter).unwrap();
+    match metadata.context.as_deref() {
+        None => return Ok(file_content),
+        Some("fork") => {
+            let mut messages: Vec<Message> = vec![Message {
+                role: String::from("user"),
+                content: Some(file_content.to_owned()),
+                tool_call_id: None,
+                tool_calls: None,
+            }];
+            if let Ok(res) = Box::pin(run_agent(&mut messages)).await {
+                dbg!(&res);
+                return Ok(res);
+            }
+        }
+        Some(_) => return Ok(file_content),
+    }
+    Ok(String::new())
 }
 
 fn write_tool(args: &str) -> io::Result<String> {
