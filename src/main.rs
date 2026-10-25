@@ -9,6 +9,12 @@ use std::process::Command;
 use std::sync::LazyLock;
 use std::{env, process};
 
+#[derive(Deserialize)]
+struct SkillMetadata {
+    name: String,
+    description: String,
+}
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {
@@ -121,14 +127,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = OpenAIConfig::new()
         .with_api_base(base_url)
         .with_api_key(api_key);
-
+    let mut messages: Vec<Message> = Vec::new();
+    if let Ok(skills) = load_all_skills() {
+        messages.push(Message {
+            role: String::from("system"),
+            content: Some(format!(
+                "You have access to the following skills:\n\n-{}",
+                skills
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
     let client = Client::with_config(config);
-    let mut messages: Vec<Message> = vec![Message {
+    let user_content = evaluate_user_content(args.prompt);
+    messages.push(Message {
         role: "user".to_owned(),
-        content: Some(args.prompt),
+        content: Some(user_content),
         tool_calls: None,
         tool_call_id: None,
-    }];
+    });
     loop {
         #[allow(unused_variables)]
         let response = call_llm(&client, &messages, "anthropic/claude-haiku-4.5").await?;
@@ -175,13 +193,54 @@ async fn call_llm(
     Ok(response)
 }
 
+fn load_all_skills() -> Result<String, Box<dyn std::error::Error>> {
+    let mut directories = Vec::new();
+    let mut result = Vec::new();
+    for entry in fs::read_dir(".claude/skills/")? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            directories.push(entry.file_name().to_string_lossy().into_owned());
+            let file = entry.path().join("SKILL.md").to_string_lossy().into_owned();
+            let file_content = read_file(&file).unwrap();
+            let rest = file_content
+                .strip_prefix("---\n")
+                .ok_or("Missing opening front-matter delimiter")?;
+
+            let (front_matter, content) = rest
+                .split_once("\n---")
+                .ok_or("Missing closing front-matter delimiter")?;
+
+            let metadata: SkillMetadata = serde_yaml::from_str(front_matter)?;
+            result.push(format!("{}: {}", metadata.name, metadata.description));
+        }
+    }
+    return Ok(result.join("\n"));
+}
+
+fn evaluate_user_content(prompt: String) -> String {
+    if prompt.starts_with("/") {
+        let skill_name = &prompt[1..];
+        let file = format!(".claude/skills/{skill_name}/SKILL.md");
+        let input = read_file(&file).unwrap();
+        let (_, content) = input.rsplit_once("---").unwrap();
+        return content.trim().to_owned();
+    } else {
+        return prompt;
+    }
+}
+
+fn read_file(file_path: &String) -> io::Result<String> {
+    let content = fs::read_to_string(file_path)?;
+    Ok(content)
+}
+
 fn read_tool(args: &str) -> io::Result<String> {
     let map: HashMap<String, String> = serde_json::from_str(args).unwrap_or_default();
     let file_path = map
         .get("file_path")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
-    let content = fs::read_to_string(file_path)?;
-    Ok(content)
+    read_file(file_path)
 }
 
 fn execute_tool(tool: &ToolCall) -> io::Result<String> {
