@@ -140,13 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     let client = Client::with_config(config);
-    let user_content = evaluate_user_content(args.prompt);
-    messages.push(Message {
-        role: "user".to_owned(),
-        content: Some(user_content),
-        tool_calls: None,
-        tool_call_id: None,
-    });
+    if let Ok(user_content) = evaluate_user_content(args.prompt) {
+        messages.push(Message {
+            role: "user".to_owned(),
+            content: Some(user_content),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
     loop {
         #[allow(unused_variables)]
         let response = call_llm(&client, &messages, "anthropic/claude-haiku-4.5").await?;
@@ -218,15 +219,27 @@ fn load_all_skills() -> Result<String, Box<dyn std::error::Error>> {
     return Ok(result.join("\n"));
 }
 
-fn evaluate_user_content(prompt: String) -> String {
+fn evaluate_user_content(prompt: String) -> io::Result<String> {
     if prompt.starts_with("/") {
-        let skill_name = &prompt[1..];
+        let mut skill_args_iter = (&prompt[1..]).split_whitespace();
+        let skill_name = skill_args_iter
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
+        let skill_args: Vec<&str> = skill_args_iter.collect();
         let file = format!(".claude/skills/{skill_name}/SKILL.md");
         let input = read_file(&file).unwrap();
         let (_, content) = input.rsplit_once("---").unwrap();
-        return content.trim().to_owned();
+        let mut content = content.to_string();
+        if !skill_args.is_empty() {
+            for (index, value) in skill_args.iter().enumerate() {
+                content = content.replace(&format!("$ARGUMENTS[{index}]"), value);
+                content = content.replace(&format!("${index}"), value);
+            }
+            content = content.replace("$ARGUMENTS", &skill_args.join(" "));
+        }
+        return Ok(content.trim().to_owned());
     } else {
-        return prompt;
+        return Ok(prompt);
     }
 }
 
