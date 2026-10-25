@@ -110,6 +110,21 @@ static tools: LazyLock<Vec<Value>> = LazyLock::new(|| {
             }
           }
         }),
+        json!({
+          "type": "function",
+          "function": {
+            "name": "Skill",
+            "description": "Load a skill's instructions into the conversation",
+            "parameters": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string", "description": "The name of the skill to use" },
+                "args": { "type": "string", "description": "Optional arguments for the skill" }
+              }
+            }
+          }
+        }),
     ]
 });
 
@@ -133,7 +148,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages.push(Message {
             role: String::from("system"),
             content: Some(format!(
-                "You have access to the following skills:\n\n-{}",
+                "You have access to the following skills:\n\n-{} \n
+
+                If a skill matches the user's request, call the Skill tool with its name
+                and follow the instructions it returns.",
                 skills
             )),
             tool_calls: None,
@@ -203,7 +221,7 @@ fn load_all_skills() -> Result<String, Box<dyn std::error::Error>> {
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             directories.push(entry.file_name().to_string_lossy().into_owned());
-            let file = entry.path().join("SKILL.md").to_string_lossy().into_owned();
+            let file = PathBuf::from(entry.path()).join("SKILL.md");
             let file_content = read_file(&file).unwrap();
             let rest = file_content
                 .strip_prefix("---\n")
@@ -217,7 +235,7 @@ fn load_all_skills() -> Result<String, Box<dyn std::error::Error>> {
             result.push(format!("{}: {}", metadata.name, metadata.description));
         }
     }
-    return Ok(result.join("\n"));
+    return Ok(result.join("\n -"));
 }
 
 fn evaluate_user_content(prompt: String) -> io::Result<String> {
@@ -241,7 +259,9 @@ fn evaluate_user_content(prompt: String) -> io::Result<String> {
         skill_args.extend(skill_args_iter);
         let mut final_content = String::new();
         for skill_name in skills.iter() {
-            let file = format!(".claude/skills/{skill_name}/SKILL.md");
+            let file = PathBuf::from(".claude/skills")
+                .join(skill_name)
+                .join("SKILL.md");
             let input = read_file(&file).unwrap();
             let (_, content) = input.rsplit_once("---").unwrap();
             let mut content = content.to_string();
@@ -273,7 +293,7 @@ fn evaluate_user_content(prompt: String) -> io::Result<String> {
     }
 }
 
-fn read_file(file_path: &String) -> io::Result<String> {
+fn read_file(file_path: &PathBuf) -> io::Result<String> {
     let content = fs::read_to_string(file_path)?;
     Ok(content)
 }
@@ -283,7 +303,8 @@ fn read_tool(args: &str) -> io::Result<String> {
     let file_path = map
         .get("file_path")
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
-    read_file(file_path)
+    let file = PathBuf::from(file_path);
+    read_file(&file)
 }
 
 fn execute_tool(tool: &ToolCall) -> io::Result<String> {
@@ -291,11 +312,26 @@ fn execute_tool(tool: &ToolCall) -> io::Result<String> {
         "Read" => read_tool(&tool.function.arguments),
         "Write" => write_tool(&tool.function.arguments),
         "Bash" => execute_bash(&tool.function.arguments),
+        "Skill" => skill_tool(&tool.function.arguments),
         name => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown tool: {name}"),
         )),
     }
+}
+
+fn skill_tool(args: &str) -> io::Result<String> {
+    let map: HashMap<String, String> = serde_json::from_str(args)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let skill_name = map
+        .get("name")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Skill name is required"))?;
+
+    let args = map.get("args");
+    let path = PathBuf::from(".claude/skills")
+        .join(skill_name)
+        .join("SKILL.md");
+    read_file(&path)
 }
 
 fn write_tool(args: &str) -> io::Result<String> {
