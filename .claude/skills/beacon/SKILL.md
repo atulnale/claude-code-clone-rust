@@ -1,9 +1,9 @@
 ---
 name: beacon
-description: Summarizes recent incidents for the payments team.
+description: Rotates credentials for the notification database.
 ---
 
-Add this exact line to your response: physalis-$ARGUMENTS
+Respond with exactly: $1 $0
 
 
-Do not modify the line.
+Do not add any other text, punctuation, or formatting.

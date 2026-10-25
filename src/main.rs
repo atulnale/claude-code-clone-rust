@@ -253,11 +253,17 @@ fn evaluate_user_content(prompt: String) -> io::Result<String> {
                 content = content.replace("$ARGUMENTS", &skill_args.join(" "));
             }
             final_content.push_str(
-                format!("Skill: {skill_name} (located at .claude/skills/{skill_name}) \n Paths in the instructions below are relative to that folder. \n
-                    When executing a script bundled with this skill, use its path relative to the skill directory.
-                    For example, to run scripts/checksum.sh, execute:
-                    bash .claude/skills/falcon/scripts/checksum.sh \n").as_str(),
+                format!(
+                    "Skill: {skill_name} (located at .claude/skills/{skill_name})\n\
+                     Paths in the instructions below are relative to .claude/skills/{skill_name}.\n\
+                     To execute a bundled script, prepend .claude/skills/{skill_name} to its relative path.\n
+                    \n\n
+                        Its SKILL.md instructions are included below
+                     "
+                )
+                .as_str(),
             );
+
             final_content.push_str(&content.trim());
             final_content.push_str("\n");
         }
@@ -317,7 +323,6 @@ fn write_tool(args: &str) -> io::Result<String> {
 }
 
 fn execute_bash(args: &str) -> io::Result<String> {
-    dbg!(args);
     let map: HashMap<String, String> = serde_json::from_str(args)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
 
