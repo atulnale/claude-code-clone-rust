@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 use std::{env, process};
@@ -221,23 +222,40 @@ fn load_all_skills() -> Result<String, Box<dyn std::error::Error>> {
 
 fn evaluate_user_content(prompt: String) -> io::Result<String> {
     if prompt.starts_with("/") {
-        let mut skill_args_iter = (&prompt[1..]).split_whitespace();
-        let skill_name = skill_args_iter
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file path is required"))?;
-        let skill_args: Vec<&str> = skill_args_iter.collect();
-        let file = format!(".claude/skills/{skill_name}/SKILL.md");
-        let input = read_file(&file).unwrap();
-        let (_, content) = input.rsplit_once("---").unwrap();
-        let mut content = content.to_string();
-        if !skill_args.is_empty() {
-            for (index, value) in skill_args.iter().enumerate() {
-                content = content.replace(&format!("$ARGUMENTS[{index}]"), value);
-                content = content.replace(&format!("${index}"), value);
+        let mut skill_args_iter = prompt.split_whitespace();
+        let mut skills: Vec<&str> = Vec::new();
+        let mut skill_args = Vec::new();
+        for arg in skill_args_iter.by_ref() {
+            if !arg.starts_with("/") {
+                skill_args.push(arg);
+                break;
             }
-            content = content.replace("$ARGUMENTS", &skill_args.join(" "));
+            let arg = &arg[1..];
+            let path = PathBuf::from(".claude/skills").join(arg).join("SKILL.md");
+            if !path.exists() {
+                skill_args.push(arg);
+                break;
+            }
+            skills.push(arg);
         }
-        return Ok(content.trim().to_owned());
+        skill_args.extend(skill_args_iter);
+        let mut final_content = String::new();
+        for skill_name in skills.iter() {
+            let file = format!(".claude/skills/{skill_name}/SKILL.md");
+            let input = read_file(&file).unwrap();
+            let (_, content) = input.rsplit_once("---").unwrap();
+            let mut content = content.to_string();
+            if !skill_args.is_empty() {
+                for (index, value) in skill_args.iter().enumerate() {
+                    content = content.replace(&format!("$ARGUMENTS[{index}]"), value);
+                    content = content.replace(&format!("${index}"), value);
+                }
+                content = content.replace("$ARGUMENTS", &skill_args.join(" "));
+            }
+            final_content.push_str(&content.trim());
+            final_content.push_str("\n");
+        }
+        return Ok(final_content);
     } else {
         return Ok(prompt);
     }
