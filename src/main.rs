@@ -7,8 +7,12 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use std::{env, process};
+
+use crate::lsp_client::LspClient;
+
+mod lsp_client;
 
 #[derive(Deserialize)]
 struct SkillMetadata {
@@ -54,8 +58,8 @@ struct FunctionCall {
     arguments: String,
 }
 
-static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
-    vec![
+static TOOLS: LazyLock<Mutex<Vec<Value>>> = LazyLock::new(|| {
+    Mutex::new(vec![
         json!({
           "type": "function",
           "function": {
@@ -126,7 +130,7 @@ static TOOLS: LazyLock<Vec<Value>> = LazyLock::new(|| {
             }
           }
         }),
-    ]
+    ])
 });
 static BASE_URL: LazyLock<String> = LazyLock::new(|| {
     env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string())
@@ -141,7 +145,7 @@ static API_KEY: LazyLock<String> = LazyLock::new(|| {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
+    let _lsp_client = initialize_lsp().await?;
     let mut messages: Vec<Message> = Vec::new();
     if let Ok(skills) = load_all_skills() {
         messages.push(Message {
@@ -321,11 +325,56 @@ async fn execute_tool(tool: &ToolCall) -> io::Result<String> {
         "Write" => write_tool(&tool.function.arguments),
         "Bash" => execute_bash(&tool.function.arguments),
         "Skill" => skill_tool(&tool.function.arguments).await,
+        "LSP" => lsp_tool(&tool.function.arguments).await,
         name => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown tool: {name}"),
         )),
     }
+}
+async fn lsp_tool(args: &str) -> io::Result<String> {
+    Ok("LSP is not implemented yet".to_string())
+}
+
+async fn initialize_lsp() -> io::Result<Option<LspClient>> {
+    let client = LspClient::from_environment()
+        .or_else(|err| Err(io::Error::new(io::ErrorKind::Other, err.to_string())))?;
+    if client.is_some() {
+        let mut tools = TOOLS.lock().unwrap();
+        tools.push(json!(json!({
+                  "type": "function",
+                  "function": {
+                    "name": "LSP",
+                    "description": "Returns the file, line, and character where a symbol is defined.",
+                    "parameters": {
+                      "type": "object",
+                      "properties": {
+                        "operation": {
+                          "type": "string",
+                          "enum": ["goToDefinition"]
+                        },
+                        "filePath": {
+                          "type": "string",
+                          "description": "Absolute path, or a path relative to the agent's current working directory."
+                        },
+                        "line": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "description": "1-based line number of the symbol."
+                        },
+                        "character": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "description": "1-based character offset in UTF-16 code units (same as character count for ASCII)."
+                        }
+                      },
+                      "required": ["operation", "filePath", "line", "character"]
+                    }
+                  }
+                })));
+        eprintln!("LSP client connected");
+    }
+    Ok(client)
 }
 
 async fn skill_tool(args: &str) -> io::Result<String> {
